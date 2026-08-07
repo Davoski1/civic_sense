@@ -9,18 +9,29 @@ const DOMAINS = [
   "channelstv.com",
   "vanguardngr.com",
   "dailypost.ng",
+  "dailytrust.com",
+  "leadership.ng",
+  "tribuneonlineng.com",
+  "businessday.ng",
+  "pmnewsnigeria.com",
+  "ripplesnigeria.com",
+  "informationng.com",
+  "dubawa.org",
+  "factcheckhub.com",
+  "factcheckafrica.net",
 ];
 
-export async function searchClaim(claim) {
+export async function searchClaim(claim, extraQuery = "") {
   try {
+    const query = extraQuery || `${claim} Nigeria`;
     const response = await axios.post(
       TAVILY_URL,
       {
         api_key: process.env.TAVILY_API_KEY,
-        query: `${claim} Nigeria`,
+        query,
         search_depth: "basic",
         include_answer: true,
-        max_results: 5,
+        max_results: 8,
         include_domains: DOMAINS,
       },
       { timeout: 10000 }
@@ -38,10 +49,7 @@ export async function searchClaim(claim) {
     }
 
     output += results
-      .map(
-        (r, i) =>
-          `[${i + 1}] ${r.title}\n${r.content}\nURL: ${r.url}`
-      )
+      .map((r, i) => `[${i + 1}] ${r.title}\n${r.content}\nURL: ${r.url}`)
       .join("\n\n");
 
     return output;

@@ -2,19 +2,80 @@ import express from "express";
 import twilio from "twilio";
 import cors from "cors";
 import dotenv from "dotenv";
+import compression from "compression";
+import rateLimit from "express-rate-limit";
+import multer from "multer";
 dotenv.config();
 
-import { searchClaim } from "./services/search.js";
-import { factCheck } from "./services/gemini.js";
-import { saveFactCheck, getRecentFactChecks, saveReport, getReports, updateReportStatus } from "./services/db.js";
+import { runFactCheck } from "./services/pipeline.js";
+import {
+  connectDB,
+  saveFactCheck,
+  getRecentFactChecks,
+  saveReport,
+  getReports,
+  updateReportStatus,
+  isDbConnected,
+  countArticles,
+} from "./services/db.js";
+import { startScraper, getScraperStats, syncOnce } from "./services/scraper.js";
+import { validateImageBuffer, bufferToDataUrl, imageFromUrl } from "./services/image.js";
+import { NEWS_SOURCES } from "./services/newsSources.js";
 
 const app = express();
+app.use(compression());
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+
+const MEDIA_MAX_MB = Number(process.env.MEDIA_MAX_MB) || 5;
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MEDIA_MAX_MB * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only JPEG, PNG, WebP and GIF images are supported"));
+    }
+  },
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX) || 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: "Too many requests. Please try again later." },
+});
+app.use("/api/factcheck", apiLimiter);
+app.use("/api/chat", apiLimiter);
 
 app.get("/", (req, res) => {
   res.send("Kratos — CivicSense fact-checking bot is running.");
+});
+
+app.get("/api/health", async (req, res) => {
+  await connectDB();
+  res.json({
+    success: true,
+    uptime: process.uptime(),
+    db: isDbConnected(),
+    articles: await countArticles(),
+    scraper: getScraperStats(),
+  });
+});
+
+app.post("/api/scrape", async (req, res) => {
+  if (req.query.secret !== process.env.SCRAPE_SECRET) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+  try {
+    const result = await syncOnce();
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get("/api/factchecks", async (req, res) => {
@@ -26,21 +87,77 @@ app.get("/api/factchecks", async (req, res) => {
   }
 });
 
+function parseImagePayload(req) {
+  if (req.file && req.file.buffer) {
+    const mime = validateImageBuffer(req.file.buffer);
+    return { imageDataUrl: bufferToDataUrl(req.file.buffer, mime), caption: req.body?.caption || "" };
+  }
+  const { imageBase64, imageUrl } = req.body || {};
+  if (imageBase64) {
+    const buffer = Buffer.from(imageBase64, "base64");
+    const mime = validateImageBuffer(buffer);
+    return { imageDataUrl: bufferToDataUrl(buffer, mime), caption: req.body?.caption || "" };
+  }
+  if (imageUrl) {
+    return { imageDataUrl: null, caption: req.body?.caption || "", imageUrl };
+  }
+  return null;
+}
+
+async function handleFactCheck(req, res) {
+  try {
+    const claim = (req.body?.claim || req.query?.claim || "").toString().trim();
+    const caption = (req.body?.caption || "").toString().trim();
+
+    let parsed = null;
+    try {
+      parsed = parseImagePayload(req);
+    } catch (err) {
+      return res.status(400).json({ success: false, error: err.message });
+    }
+
+    let imageDataUrl = parsed?.imageDataUrl || null;
+    if (parsed?.imageUrl) {
+      const remote = await imageFromUrl(parsed.imageUrl);
+      if (remote) imageDataUrl = remote.dataUrl;
+    }
+
+    if (!claim && !imageDataUrl) {
+      return res.status(400).json({ success: false, error: "Provide a claim and/or an image" });
+    }
+
+    const result = await runFactCheck({ claim, imageDataUrl, caption });
+
+    await saveFactCheck({
+      claim: result.claim || claim,
+      verdict: result.verdict,
+      channel: "api",
+      timestamp: new Date(),
+    }).catch((err) => console.error("DB save error:", err.message));
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error("Fact-check error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+app.post("/api/factcheck", upload.single("image"), handleFactCheck);
+
 app.post("/api/chat", async (req, res) => {
   const { claim } = req.body;
   if (!claim || !claim.trim()) {
     return res.status(400).json({ success: false, error: "No claim provided" });
   }
   try {
-    const searchResults = await searchClaim(claim);
-    const verdict = await factCheck(claim, searchResults);
+    const result = await runFactCheck({ claim: claim.trim() });
     await saveFactCheck({
       claim,
-      verdict,
+      verdict: result.verdict,
       channel: "dashboard",
       timestamp: new Date(),
     }).catch((err) => console.error("DB save error:", err.message));
-    res.json({ success: true, data: { claim, verdict } });
+    res.json({ success: true, data: { claim, verdict: result.verdict } });
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ success: false, error: err.message });
@@ -48,39 +165,45 @@ app.post("/api/chat", async (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
-  const message = req.body.Body?.trim();
+  const message = (req.body.Body || "").trim();
   const from = req.body.From;
+  const numMedia = parseInt(req.body.NumMedia || "0", 10);
+  const mediaUrl = numMedia > 0 ? req.body.MediaUrl0 : null;
 
-  if (!message) {
+  if (!message && !mediaUrl) {
     return res.status(400).send("No message");
   }
 
-  console.log(`Incoming from ${from}: "${message}"`);
+  console.log(`Incoming from ${from}: "${message}" media=${numMedia}`);
+
+  const respond = (text) => {
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(text);
+    res.type("text/xml");
+    res.send(twiml.toString());
+  };
 
   try {
-    const searchResults = await searchClaim(message);
-    const verdict = await factCheck(message, searchResults);
+    let imageDataUrl = null;
+    if (mediaUrl) {
+      const remote = await imageFromUrl(mediaUrl);
+      if (remote) imageDataUrl = remote.dataUrl;
+    }
+
+    const result = await runFactCheck({ claim: message, imageDataUrl, caption: message });
 
     await saveFactCheck({
-      claim: message,
-      verdict,
+      claim: result.claim || message,
+      verdict: result.verdict,
       channel: "whatsapp",
       hashedFrom: from,
       timestamp: new Date(),
     }).catch((err) => console.error("DB save error:", err.message));
 
-    const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(verdict);
-    res.type("text/xml");
-    res.send(twiml.toString());
+    respond(result.verdict);
   } catch (err) {
     console.error("Webhook error:", err);
-    const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(
-      "Sorry, I couldn't process that claim. Please try again."
-    );
-    res.type("text/xml");
-    res.send(twiml.toString());
+    respond("Sorry, I couldn't process that. Please try again with a text claim.");
   }
 });
 
@@ -158,5 +281,32 @@ app.get("/api/incidents", async (req, res) => {
   }
 });
 
+app.get("/api/sources", (req, res) => {
+  res.json({ success: true, data: NEWS_SOURCES });
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError || err.message?.includes("image")) {
+    return res.status(400).json({ success: false, error: err.message });
+  }
+  console.error(`Unhandled error: ${err.message}`);
+  res.status(500).json({ success: false, error: err.message || "Internal server error" });
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const server = app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  startScraper();
+});
+
+async function shutdown(signal) {
+  console.log(`${signal} received — shutting down gracefully`);
+  server.close(async () => {
+    const { default: mongoose } = await import("mongoose");
+    await mongoose.disconnect();
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
+}
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));

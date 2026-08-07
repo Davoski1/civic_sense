@@ -24,13 +24,23 @@ in real life, in the judges hands.
 civicsense/
 ├── CONTEXT.md            (This file — read before touching anything)
 ├── bot_server/           (PRIMARY — the WhatsApp bot and AI pipeline)
-│   ├── server.js         (Express webhook entry point)
-│   ├── scraper.js        (Background RSS scraper, runs every 30 mins)
+│   ├── server.js         (Express webhook entry point, single /api/factcheck)
+│   ├── scripts/
+│   │   └── verify-feeds.js      (Check all RSS feeds: npm run verify:feeds)
 │   ├── services/
-│   │   ├── gemini.js     (Gemini RAG fact-check logic)
-│   │   └── db.js         (MongoDB connection, read and write)
+│   │   ├── pipeline.js   (Orchestrator: parallel retrieval + single LLM call)
+│   │   ├── gemini.js     (Gemini RAG, vision claim extraction, LRU cache)
+│   │   ├── scraper.js    (RSS sync of 17 NG feeds into MongoDB article index)
+│   │   ├── newsSources.js(Registry of 17 Nigerian news + fact-check sources)
+│   │   ├── search.js     (Tavily live search, 16 NG domains)
+│   │   ├── cache.js      (Bounded LRU cache)
+│   │   ├── image.js      (Image validation/decoding only — never stored)
+│   │   └── db.js         (MongoDB: FactCheck, Article, Report schemas)
 │   ├── data/
 │   │   └── civic_kb.json (Manually curated Nigerian civic knowledge base)
+│   ├── test/
+│   │   ├── testKratos.js (npm test — 12 parallel live claims)
+│   │   └── testPipeline.js (npm run test:pipeline — server, image, scraper)
 │   ├── .env.example      (Copy to .env and fill in your keys)
 │   └── package.json
 │
@@ -49,13 +59,18 @@ civicsense/
    - Default: run fact-check pipeline
    - "What is happening in [State]": run conflict tracker (stretch goal)
    - "Report": start anonymous reporting flow (stretch goal)
-4. Fact-check pipeline:
-   a. gemini.js embeds the user claim
-   b. Searches civic_kb.json + scraped news in MongoDB
-   c. Passes retrieved context + claim to Gemini API
-   d. Gemini returns structured verdict
+4. Fact-check pipeline (services/pipeline.js):
+   a. If an image was sent, gemini.js vision extracts the claim
+      (image is analyzed only — never stored or served back)
+   b. Retrieval runs in PARALLEL: civic_kb.json keyword match +
+      MongoDB article index (RSS-synced from 17 NG feeds) + Tavily live search
+   c. All evidence goes into a SINGLE Gemini API call
+   d. Gemini returns a structured verdict (JSON) + formatted WhatsApp reply
 5. server.js sends verdict back to user via Twilio
 6. Fact-check is logged to MongoDB (fc_dashboard reads from here)
+
+Speed budget: <8s typical, <15s p95. Parallel retrieval + one LLM call,
+25s hard deadline. Verdicts cached (bounded LRU).
 
 ---
 
@@ -99,12 +114,16 @@ federal budget figures, CBN policies, security incidents.
 
 Copy .env.example to .env and fill in:
 
-GEMINI_API_KEY=
+OPENROUTER_API_KEY=
+TAVILY_API_KEY=
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_WHATSAPP_NUMBER=
 MONGODB_URI=
 PORT=3000
+
+Optional tuning: SCRAPE_INTERVAL_MIN, ARTICLE_TTL_DAYS, SCRAPE_SECRET,
+MEDIA_MAX_MB, CACHE_TTL_SEC, CACHE_MAX_ENTRIES, RATE_LIMIT_MAX.
 
 Never commit .env to GitHub.
 
@@ -114,10 +133,12 @@ Never commit .env to GitHub.
 
 - Runtime: Node.js
 - Framework: Express
-- AI: Gemini 2.5 Flash via Google AI SDK
-- Database: MongoDB Atlas (free tier)
+- AI: Gemini 2.5 Flash via OpenRouter (LLM_MODEL)
+- Web search: Tavily API (16 Nigerian domains)
+- Database: MongoDB Atlas (free tier) — FactCheck, Article, Report collections
 - WhatsApp Gateway: Twilio WhatsApp Sandbox
-- Scraper: axios + cheerio targeting RSS feeds
+- Scraper: rss-parser targeting 17 NG RSS feeds (30-min sync, 14-day TTL)
+- Cache: bounded LRU for verdicts
 - Dashboard: React + Tailwind deployed on Vercel
 - Bot Deployment: Railway
 
@@ -131,7 +152,7 @@ Never commit .env to GitHub.
 | Gemini RAG pipeline | bot_server/services/gemini.js | debugAyo | MUST SHIP |
 | MongoDB connection | bot_server/services/db.js | debugAyo | MUST SHIP |
 | Civic knowledge base | bot_server/data/civic_kb.json | adriel-babalola | MUST SHIP |
-| RSS scraper | bot_server/scraper.js | adriel-babalola | HIGH |
+| RSS scraper | bot_server/services/scraper.js | adriel-babalola | HIGH |
 | Public dashboard | fc_dashboard/ | debugAyo | MEDIUM |
 | Conflict tracker | bot_server/server.js (new branch) | — | STRETCH |
 | Anonymous reporting | bot_server/server.js (new branch) | — | STRETCH |
