@@ -147,6 +147,7 @@ civic_sense/
 | Feature | Status |
 |---------|--------|
 | **WhatsApp Fact-Checking** — Twilio webhook → AI pipeline → instant reply (incl. image claims) | ✅ Live |
+| **Telegram Fact-Checking** — BotFather bot, same pipeline (text + photo claims) | ✅ Live |
 | **Live News Search** — Tavily API queries 16 major Nigerian news domains | ✅ Live |
 | **RSS Article Index** — 17 Nigerian feeds (news + IFCN fact-checkers) synced every 30 min into MongoDB | ✅ Live |
 | **Image Claim Extraction** — send a screenshot/poster, bot reads the claim (analyzed only, never stored) | ✅ Live |
@@ -188,6 +189,7 @@ civic_sense/
 | `GET` | `/` | Health check |
 | `GET` | `/api/health` | DB + article count + scraper status |
 | `POST` | `/webhook` | Twilio WhatsApp webhook (text + image) |
+| `POST` | `/webhook/telegram` | Telegram Bot webhook (text + photo, verified via secret token) |
 | `POST` | `/api/factcheck` | Single endpoint: post claim and/or image, get verdict (multipart or JSON) |
 | `POST` | `/api/chat` | Submit claim for fact-checking (JSON, dashboard-compatible) |
 | `GET` | `/api/factchecks` | Get recent fact-checks (50 items) |
@@ -260,6 +262,9 @@ npm test               # 12 parallel live claims
 npm run test:pipeline  # End-to-end: server + image + scraper
 npm run verify:feeds   # Check all 17 RSS feeds
 
+# Register the Telegram webhook (run after deploying):
+npm run setup:telegram -- https://your-app.up.railway.app/webhook/telegram
+
 # Dashboard (separate terminal)
 cd fc_dashboard
 npm install
@@ -281,6 +286,8 @@ npm run dev            # Local: http://localhost:5174
 | `TWILIO_ACCOUNT_SID` | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token |
 | `TWILIO_WHATSAPP_NUMBER` | Twilio WhatsApp number |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
+| `TELEGRAM_WEBHOOK_SECRET` | Secret for Telegram webhook verification |
 | `PORT` | Server port (default: 3000) |
 | `LLM_MODEL` | Model ID on OpenRouter (default: `google/gemini-2.5-flash`) |
 | `LLM_TIMEOUT_MS` | LLM timeout (default: 25000) |

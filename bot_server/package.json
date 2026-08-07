@@ -7,7 +7,8 @@
     "start": "node server.js",
     "test": "node test/testKratos.js",
     "test:pipeline": "node test/testPipeline.js",
-    "verify:feeds": "node scripts/verify-feeds.js"
+    "verify:feeds": "node scripts/verify-feeds.js",
+    "setup:telegram": "node scripts/setup-telegram.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

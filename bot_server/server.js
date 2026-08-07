@@ -20,6 +20,13 @@ import {
 } from "./services/db.js";
 import { startScraper, getScraperStats, syncOnce } from "./services/scraper.js";
 import { validateImageBuffer, bufferToDataUrl, imageFromUrl } from "./services/image.js";
+import {
+  verifyTelegramSecret,
+  extractMessage,
+  getFileUrl,
+  sendChatAction,
+  sendMessage,
+} from "./services/telegram.js";
 import { NEWS_SOURCES } from "./services/newsSources.js";
 
 const app = express();
@@ -204,6 +211,49 @@ app.post("/webhook", async (req, res) => {
   } catch (err) {
     console.error("Webhook error:", err);
     respond("Sorry, I couldn't process that. Please try again with a text claim.");
+  }
+});
+
+app.post("/webhook/telegram", async (req, res) => {
+  if (!verifyTelegramSecret(req.get("X-Telegram-Bot-Api-Secret-Token"))) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const update = req.body;
+  const message = extractMessage(update);
+  if (!message || !message.chatId) {
+    return res.send("ok");
+  }
+
+  console.log(`Telegram from ${message.chatId}: "${message.text}" fileId=${message.fileId || "none"}`);
+
+  res.send("ok");
+  if (!message.text && !message.fileId) return;
+
+  try {
+    sendChatAction(message.chatId, "typing");
+
+    let imageDataUrl = null;
+    if (message.fileId) {
+      const fileUrl = await getFileUrl(message.fileId);
+      const remote = await imageFromUrl(fileUrl);
+      if (remote) imageDataUrl = remote.dataUrl;
+    }
+
+    const result = await runFactCheck({ claim: message.text, imageDataUrl, caption: message.text });
+
+    await saveFactCheck({
+      claim: result.claim || message.text,
+      verdict: result.verdict,
+      channel: "telegram",
+      hashedFrom: String(message.chatId),
+      timestamp: new Date(),
+    }).catch((err) => console.error("DB save error:", err.message));
+
+    await sendMessage(message.chatId, result.verdict);
+  } catch (err) {
+    console.error("Telegram webhook error:", err);
+    await sendMessage(message.chatId, "Sorry, I couldn't process that. Please try again with a text claim.");
   }
 });
 
