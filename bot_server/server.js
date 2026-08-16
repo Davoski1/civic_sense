@@ -174,6 +174,7 @@ app.post("/api/chat", async (req, res) => {
 app.post("/webhook", async (req, res) => {
   const message = (req.body.Body || "").trim();
   const from = req.body.From;
+  const to = req.body.To;
   const numMedia = parseInt(req.body.NumMedia || "0", 10);
   const mediaUrl = numMedia > 0 ? req.body.MediaUrl0 : null;
 
@@ -183,35 +184,54 @@ app.post("/webhook", async (req, res) => {
 
   console.log(`Incoming from ${from}: "${message}" media=${numMedia}`);
 
-  const respond = (text) => {
-    const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(text);
-    res.type("text/xml");
-    res.send(twiml.toString());
-  };
+  // Immediately respond with empty TwiML to avoid Twilio's 15-second timeout.
+  // The actual fact-check result will be sent asynchronously via the REST API.
+  const twiml = new twilio.twiml.MessagingResponse();
+  res.type("text/xml");
+  res.status(200).send(twiml.toString());
 
-  try {
-    let imageDataUrl = null;
-    if (mediaUrl) {
-      const remote = await imageFromUrl(mediaUrl);
-      if (remote) imageDataUrl = remote.dataUrl;
+  // Process fact-check asynchronously and send reply via Twilio REST API
+  setImmediate(async () => {
+    try {
+      let imageDataUrl = null;
+      if (mediaUrl) {
+        const remote = await imageFromUrl(mediaUrl);
+        if (remote) imageDataUrl = remote.dataUrl;
+      }
+
+      const result = await runFactCheck({ claim: message, imageDataUrl, caption: message });
+
+      await saveFactCheck({
+        claim: result.claim || message,
+        verdict: result.verdict,
+        channel: "whatsapp",
+        hashedFrom: from,
+        timestamp: new Date(),
+      }).catch((err) => console.error("DB save error:", err.message));
+
+      // Send the verdict back via Twilio REST API
+      const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      await twilioClient.messages.create({
+        from: to,   // The Twilio WhatsApp number that received the message
+        to: from,   // The user who sent the message
+        body: result.verdict,
+      });
+      console.log(`[WhatsApp] Reply sent to ${from}`);
+    } catch (err) {
+      console.error("Webhook async error:", err);
+      // Attempt to send error message back to user
+      try {
+        const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+        await twilioClient.messages.create({
+          from: to,
+          to: from,
+          body: "Sorry, I couldn't process that. Please try again with a text claim.",
+        });
+      } catch (sendErr) {
+        console.error("Failed to send error reply:", sendErr.message);
+      }
     }
-
-    const result = await runFactCheck({ claim: message, imageDataUrl, caption: message });
-
-    await saveFactCheck({
-      claim: result.claim || message,
-      verdict: result.verdict,
-      channel: "whatsapp",
-      hashedFrom: from,
-      timestamp: new Date(),
-    }).catch((err) => console.error("DB save error:", err.message));
-
-    respond(result.verdict);
-  } catch (err) {
-    console.error("Webhook error:", err);
-    respond("Sorry, I couldn't process that. Please try again with a text claim.");
-  }
+  });
 });
 
 app.post("/webhook/telegram", async (req, res) => {
