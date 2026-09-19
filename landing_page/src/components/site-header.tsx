@@ -27,7 +27,7 @@ export default function SiteHeader() {
   const [isOpen, setIsOpen] = useState(false);
   return (
     <header className="fixed inset-x-0 top-0 z-50 px-3 py-3 md:px-6">
-      <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-3 rounded-2xl bg-white/10 px-3 py-2.5 backdrop-blur-md md:gap-4 md:px-5">
+      <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-3 rounded-2xl bg-transparent px-3 py-2.5 backdrop-blur-lg md:gap-4 md:px-5">
         <Link href="/" className="flex shrink-0 items-center gap-2.5">
           <div className="inline-flex size-10 items-center justify-center rounded-lg border">
             <Icons.logo className="size-8 text-emerald-400" />
