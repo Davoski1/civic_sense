@@ -120,7 +120,7 @@ function MobileNav({
         </Button>
       </PopoverTrigger>
       <PopoverContent
-        className="no-scrollbar h-(--radix-popper-available-height) w-(--radix-popper-available-width) overflow-y-auto rounded-none border-t border-white/10 bg-background/60 p-0 shadow-none backdrop-blur-xl duration-100"
+        className="no-scrollbar h-(--radix-popper-available-height) w-(--radix-popper-available-width) overflow-y-auto rounded-none border-t border-white/10 bg-transparent p-0 shadow-none duration-100"
         align="start"
         side="bottom"
         alignOffset={-32}
